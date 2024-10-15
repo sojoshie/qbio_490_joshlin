@@ -1,3 +1,4 @@
+# Joshua Lin
 ---
 title: "Introduction to MAF"
 author: Mahija Mogalipuvvu, adapted from Nicole Black, Wade Boohar
@@ -17,23 +18,69 @@ In this assignment, you will need to use your skills learned in class to demonst
 
 *Pre-Assignment*
 Load all necessary packages, read in the clinical data.csv file you have in your analysis_data folder, and instantiate the MAF_object.
-```{r}
+```{r setup}
+    knitr::opts_knit$set(root.dir = normalizePath("/home1/jlin7423/490_cluster/analysis_data")) 
+```
 
+```{r}
+library(maftools)
+library(TCGAbiolinks)
+library(ggplot2)
+
+clinical <- read.csv("/home1/jlin7423/490_cluster/analysis_data/brca_clinical_data.csv")
+
+# used from from maftools_tutorial.Rmd
+maf_query <- GDCquery(
+  project = 'TCGA-BRCA',
+  data.category = "Simple Nucleotide Variation",
+  access = "open",
+  data.type = "Masked Somatic Mutation",
+  workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking"
+)
+
+#GDCdownload(maf_query)
+
+maf <- GDCprepare(maf_query)
+
+maf_object <- read.maf(maf = maf,
+                       clinicalData = clinical, 
+                       isTCGA = TRUE)
 ```
 
 
 *1*
 Choose a clinical variable (or any variable from clin_rad or clin_drug) to separate your populations into two different groups and rewrite the column or create a new column with that variable as a factor. ***Do not use age or vital_status as your clinical variable.*** Hint: if your variable is continuous, you will need to determine your own cutoffs for the different levels of the factor. If your variable is categorical and has more than two possible values, choose the two that are the most common.
 ```{r}
+with_tumor_mask <- ifelse(maf_object@clinical.data$tumor_status == 'WITH TUMOR', T, F)
+with_tumor_patients_barcode <- maf_object@clinical.data$Tumor_Sample_Barcode[with_tumor_mask]
+with_tumor_maf <- subsetMaf(maf = maf_object,
+                       tsb = with_tumor_patients_barcode)
 
+tumor_free_mask <- ifelse(maf_object@clinical.data$tumor_status == 'TUMOR FREE', T, F)
+tumor_free_patients_barcode <- maf_object@clinical.data$Tumor_Sample_Barcode[tumor_free_mask]
+tumor_free_maf <- subsetMaf(maf = maf_object,
+                       tsb = tumor_free_patients_barcode)
 ```
 
 
 *2*
 Create a co-oncoplot with the top 10-20 (you choose) most mutated genes for the two groups. Pick one that has a large discrepancy in % mutated or type of mutations between the groups and research it. 
-Research it. What is the gene used for? Can you think of any reason for the discrepancy?
+Research it. What is the gene used for? Can you think of any reason for the discrepancy? PIK3CA had a large discrepancy in % mutated between the With Tumor and Tumor Free groups because the gene is used to help produce the PI3K enzyme via p110a protein production. The discrepancy in mutations between the With Tumor and Tumor Free groups is because this PI3K enzyme helps regulate the cell cycle/growth, so higher mutations lead to more potential in abnormal cell growth (tumor production), so there would likely be different mutation % in with tumor than tumor free groups. 
 ```{r}
+with_tumor_maf.genes = getGeneSummary(with_tumor_maf)[1:10]
+tumor_free_maf.genes = getGeneSummary(tumor_free_maf)[1:10]
+mdt = merge(with_tumor_maf.genes[,.(Hugo_Symbol, MutatedSamples)], tumor_free_maf.genes[,.(Hugo_Symbol, MutatedSamples)], by = 'Hugo_Symbol', all = TRUE)
+mdt$MutatedSamples.x[is.na(mdt$MutatedSamples.x)] = 0
+mdt$MutatedSamples.y[is.na(mdt$MutatedSamples.y)] = 0
+mdt$max = apply(mdt[,.(MutatedSamples.x, MutatedSamples.y)], 1, max)
+mdt = mdt[order(max, decreasing = TRUE)]
 
+coOncoplot(m1 = with_tumor_maf,
+           m2 = tumor_free_maf,
+           m1Name = 'With Tumor',
+           m2Name = 'Tumor Free',
+           borderCol = NA,
+           )
 ```
 
 
@@ -41,21 +88,41 @@ Research it. What is the gene used for? Can you think of any reason for the disc
 Create a contingency table with your variable and chosen gene. Run a Fisher’s Exact Test between presence of mutations for that gene and your clinical variable. Create and save a mosaic plot. 
 Interpret the output of the Fisher’s Exact Test in terms of the odds ratio and p-value.
 ```{r}
+maf_object@clinical.data$tumor_status <- factor(maf_object@clinical.data$tumor_status)
+PIK3CA_maf <- subsetMaf(maf = maf_object, genes = 'PIK3CA')
+muts_PIK3CA <- PIK3CA_maf@clinical.data$Tumor_Sample_Barcode
+nums_PIK3CA <- length(muts_PIK3CA)
 
+contig <- table(maf_object@clinical.data$tumor_status, nums_PIK3CA)
+mosaicplot(contig)
+
+fisher_test <- fisher.test(contig)
+fisher_test$p.value
 ```
 
 
 *4*
 Subset your maf_object based on your chosen clinical variable and create a co-lollipop plot of your chosen gene divided between the two different clinical variable possibilities. Include descriptive names on your plot.
-Do you notice any difference in terms of mutations (e.g. sites, types, number) between the two populations?
+Do you notice any difference in terms of mutations (e.g. sites, types, number) between the two populations? There's a difference in the amount of mutations (more found in tumor free), but this could be due to the number of patients discrepancy between the populations.
 ```{r}
-
+lollipopPlot2(m1 = with_tumor_maf, 
+              m2 = tumor_free_maf, 
+              m1_name = 'With Tumor Sample Population',
+              m2_name = 'Tumor-Free Sample Population',
+              gene = 'PIK3CA')
 ```
 
 
 *5*
 Create your Overall_Survival_Status column and create a mafSurvival KM plot based on mutations in your chosen gene.
-Does there seem to be a difference? Hypothesize why or not based on the other analysis you did with the gene above.
+Does there seem to be a difference? Hypothesize why or not based on the other analysis you did with the gene above. There does seem to be a difference because as survival_time increases, mutants of PIK3CA have a generally higher survival probability than those without the mutations, which is to be expected since % mutations of PIK3CA are lower in those with tumors than without (tumor free).
 ```{r}
+maf_object@clinical.data$survival_time <- ifelse(maf_object@clinical.data$vital_status == "Dead", maf_object@clinical.data$death_days_to, maf_object@clinical.data$last_contact_days_to)
+maf_object@clinical.data$death_event <- ifelse(maf_object@clinical.data$vital_status == "Dead", T, F)
 
+mafSurvival(maf = maf_object,
+            genes = 'PIK3CA',
+            time = 'survival_time',
+            Status = 'death_event',
+            isTCGA = TRUE)
 ```
