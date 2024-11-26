@@ -1,0 +1,208 @@
+---
+title: 'Genomics Research'
+author: Joshua Lin
+date: 11/19/24
+updated: 11/26/24
+---
+
+```{r}
+# Installing + Loading BiocManager, maftools, TCGAbiolinks, ggplot2 libraries
+if (!require("knitr", quietly = TRUE)) install.packages("knitr")
+
+if (!require("BiocManager")) install.packages("BiocManager")
+BiocManager::install(version = "3.19")
+
+if (!require("TCGAbiolinks", quietly = TRUE)) BiocManager::install("TCGAbiolinks")
+
+if (!require("maftools", quietly = TRUE)) BiocManager::install("maftools")
+
+if(!require("ggplot2")) install.packages("ggplot2")
+
+library(BiocManager)
+library(maftools)
+library(TCGAbiolinks)
+library(ggplot2)
+```
+
+```{r setup}
+  dir.create('/home1/jlin7423/490_cluster/qbio490_fa24_final_LUAD/outputs')
+  knitr::opts_knit$set(root.dir = normalizePath("/home1/jlin7423/490_cluster/qbio490_fa24_final_LUAD/outputs")) 
+```
+
+
+```{r}
+# Clinical Data Object - Query, Download, Retrieve TGCA-LUAD
+clin_query <- GDCquery(project = "TCGA-LUAD",
+                       data.category = "Clinical",
+                       data.type = "Clinical Supplement",
+                       data.format = 'BCR Biotab')
+GDCdownload(clin_query)
+clinical.BCRtab.all <- GDCprepare(clin_query)
+clinic <- clinical.BCRtab.all$clinical_patient_luad[-c(1,2),]
+colnames(clinic)[ colnames(clinic) == "bcr_patient_barcode" ] <- "Tumor_Sample_Barcode"
+```
+
+```{r}
+# Making LUAD clinical csv to load faster (To be deleted)
+write.csv(clinic, "luad_clinical_data.csv", row.names=FALSE)
+clinic <- read.csv("luad_clinical_data.csv")
+```
+
+
+```{r}
+# MAF query, downloading, preparing, and reading/loading LUAD maf object
+maf_query <- GDCquery(
+  project = 'TCGA-LUAD',
+  data.category = "Simple Nucleotide Variation",
+  access = "open",
+  data.type = "Masked Somatic Mutation",
+  workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking"
+)
+
+#GDCdownload(maf_query)
+maf <- GDCprepare(maf_query)
+maf_object <- read.maf(maf = maf, clinicalData = clinic, isTCGA = TRUE)
+```
+
+Clinical variable used to separate into 2 diff groups (non-smoker + heavy exposure)
+Non-smoker = 0 smoking pack years or smoking history indicator of 1 and "not available" smoking pack years, Heavy exposure > 20 smoking pack years
+Subsetting maf_object into non-smoker and heavy exposure groups
+```{r}
+# smoking category = Non-smoker, Heavy exposure or NA
+maf_object@clinical.data$smoking_category <- ifelse((maf_object@clinical.data$tobacco_smoking_age_started == 0 | (maf_object@clinical.data$tobacco_smoking_history_indicator == 1 & maf_object@clinical.data$tobacco_smoking_pack_years_smoked == "[Not Available]")), 'Non-smoker', ifelse(maf_object@clinical.data$tobacco_smoking_pack_years_smoked > 20, 'Heavy exposure', NA))
+
+# Factor smoking category
+maf_object@clinical.data$smoking_category <- factor(maf_object@clinical.data$smoking_category)
+
+# Remove NAs (non non-smoker or heavy exposure)
+maf_object@clinical.data <- maf_object@clinical.data[!is.na(maf_object@clinical.data$smoking_category), ]
+
+# Subset non_smoker maf
+non_smoker_mask <- maf_object@clinical.data$smoking_category == 'Non-smoker'
+non_smoker_barcode <- maf_object@clinical.data$Tumor_Sample_Barcode[non_smoker_mask]
+non_smoker_maf <- subsetMaf(maf = maf_object, tsb = non_smoker_barcode)
+
+# Subset heavy exposure maf
+heavy_exposure_mask <- maf_object@clinical.data$smoking_category == 'Heavy exposure'
+heavy_exposure_barcode <- maf_object@clinical.data$Tumor_Sample_Barcode[heavy_exposure_mask]
+heavy_exposure_maf <- subsetMaf(maf = maf_object, tsb = heavy_exposure_barcode)
+```
+
+Co-oncoplot with top 10 most mutated genes for non-smoking + most-exposed groups
+```{r}
+# Config to get only top 10 most mutated genes for both subset mafs
+non_smoker_maf.genes = getGeneSummary(non_smoker_maf)[1:10]
+heavy_exposure_maf.genes = getGeneSummary(heavy_exposure_maf)[1:10]
+mdt = merge(non_smoker_maf.genes[,.(Hugo_Symbol, MutatedSamples)], heavy_exposure_maf.genes[,.(Hugo_Symbol, MutatedSamples)], by = 'Hugo_Symbol', all = TRUE)
+mdt$MutatedSamples.x[is.na(mdt$MutatedSamples.x)] = 0
+mdt$MutatedSamples.y[is.na(mdt$MutatedSamples.y)] = 0
+mdt$max = apply(mdt[,.(MutatedSamples.x, MutatedSamples.y)], 1, max)
+mdt = mdt[order(max, decreasing = TRUE)]
+
+# CoOncoplot
+coOncoplot(m1 = non_smoker_maf,
+           m2 = heavy_exposure_maf,
+           m1Name = "Non-Smoker",
+           m2Name = "Heavy exposure",
+           anno_height = 2,
+           outer_mar = 2,
+           barcode_mar = 2,
+           geneNamefont = 0.6,
+           gene_mar = 0.5,
+           titleFontSize = 0.8,
+           borderCol = NA)
+
+ggsave("/cooncoplot_NonSmoker_HeavyExposure.jpg")
+```
+
+Contingency table using mosaicplot + fisher's exact test
+```{r}
+# Subset Maf based on the specific gene
+#gene_maf <- subsetMaf(maf = maf_object, genes = 'TP53')
+#muts_gene <- gene_maf@clinical.data$Tumor_Sample_Barcode
+#nums_gene <- length(muts_gene)
+
+# Gene (TP53) Mutation Column - w/ help from Mahija Mogalipuvu
+gene_mask <- maf_object@data$Hugo_Symbol == 'TP53'
+gene_barcode <- maf_object@data$Tumor_Sample_Barcode[gene_mask]
+maf_object@clinical.data$gene_mutation <- maf_object@clinical.data$Tumor_Sample_Barcode %in% gene_barcode # Returns true if patient has mutation for gene
+
+# Contingency table w/ mosaic plot based on smoking_category and the specific gene
+contig <- table(maf_object@clinical.data$smoking_category, maf_object@clinical.data$gene_mutation)
+mosaicplot(contig)
+ggsave('/MosaicPlot_Contig_TP53_NonSmoker_HeavyExposure.jpg')
+
+# Fisher's Exact Test based on contingency table
+fisher_test <- fisher.test(contig)
+fisher_test
+
+# P value = 0.2227 > 0.05; not significant
+"output: Fisher's Exact Test for Count Data
+
+data:  contig
+p-value = 0.2227
+alternative hypothesis: true odds ratio is not equal to 1
+95 percent confidence interval:
+ 0.3890501 1.2232091
+sample estimates:
+odds ratio 
+ 0.6930737
+"
+```
+
+Colollipop plot for 2 populations for specific gene
+```{r}
+lollipopPlot2(m1 = non_smoker_maf, 
+              m2 = heavy_exposure_maf, 
+              m1_name = 'Non-Smoker',
+              m2_name = 'Heavy Exposure',
+              gene = 'TP53')
+
+ggsave("/colollipop_TP53_NonSmoker_HeavyExposure.jpg")
+```
+
+mafSurvival KM Plot based on mutations of specific gene
+```{r}
+# Maf object for only specific gene (TP53)
+maf_object <- read.maf(maf = maf, clinicalData = clinic, isTCGA = TRUE)
+
+# Gene (TP53) Mutation Column w/ help from Mahija Mogalipuvu
+gene_mask <- maf_object@data$Hugo_Symbol == 'TP53'
+gene_barcode <- maf_object@data$Tumor_Sample_Barcode[gene_mask]
+maf_object@clinical.data$gene_mutation <- maf_object@clinical.data$Tumor_Sample_Barcode %in% gene_barcode # Returns true if patient has mutation for gene
+
+# Survival Time Column (numeric)
+maf_object@clinical.data$survival_time <- ifelse(maf_object@clinical.data$vital_status == "Dead", maf_object@clinical.data$death_days_to, maf_object@clinical.data$last_contact_days_to)
+maf_object@clinical.data$survival_time <- as.numeric(maf_object@clinical.data$survival_time)
+
+# Remove those with NAs from survival_time
+maf_object@clinical.data <- maf_object@clinical.data[(!is.na(maf_object@clinical.data$survival_time)), ]
+
+# Death Event Column
+maf_object@clinical.data$death_event <- ifelse(maf_object@clinical.data$vital_status == "Dead", T, F)
+
+# mafSurvival KM Plot for gene
+mafSurvival(maf = maf_object,
+            genes = 'TP53',
+            time = 'survival_time',
+            Status = 'death_event',
+            isTCGA = TRUE)
+
+ggsave('/mafSurvival_KM_TP53.jpg')
+
+"
+
+Group
+<chr>
+medianTime
+<dbl>
+N
+<int>
+Mutant	202	241		
+WT	254	246
+
+TP53 
+ 276 
+"
+```
+
